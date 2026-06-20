@@ -1,0 +1,2 @@
+ora_crm_database.db
+__pycache__/
