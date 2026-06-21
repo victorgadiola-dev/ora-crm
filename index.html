@@ -413,9 +413,18 @@
         }
       };
 
+    // O sistema pode ser aberto pelo domínio externo comercial.oragestao.com.br.
+    // Mesmo assim, a API oficial continua sendo o backend do Render.
+    const REMOTE_API_URL = "https://ora-crm.onrender.com/api";
+    const PUBLIC_SITE_URL = "https://comercial.oragestao.com.br";
     const API_URL = (["localhost", "127.0.0.1", ""].includes(location.hostname))
       ? "http://localhost:8000/api"
-      : `${location.origin}/api`;
+      : REMOTE_API_URL;
+    function publicSiteBase(){
+      const host = location.hostname;
+      if(["localhost", "127.0.0.1", ""].includes(host)) return location.href.split('?')[0].split('#')[0];
+      return PUBLIC_SITE_URL;
+    }
 
       function init() {
         loadAll().then(() => {
@@ -600,14 +609,71 @@
         for(let i=0;i<str.length;i++){ h ^= str.charCodeAt(i); h += (h<<1)+(h<<4)+(h<<7)+(h<<8)+(h<<24); }
         return ('00000000'+(h>>>0).toString(16)).slice(-8);
       }
+      function utf8Bytes(str){
+        if(window.TextEncoder) return Array.from(new TextEncoder().encode(str));
+        const utf8 = unescape(encodeURIComponent(str));
+        return Array.from(utf8).map(c=>c.charCodeAt(0));
+      }
+      function sha256HexFallback(str){
+        const K = [
+          0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+          0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+          0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+          0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+          0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+          0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+          0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+          0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+        ];
+        const rotr = (x,n) => (x >>> n) | (x << (32 - n));
+        const bytes = utf8Bytes(str);
+        const bitLen = bytes.length * 8;
+        bytes.push(0x80);
+        while(bytes.length % 64 !== 56) bytes.push(0);
+        const hi = Math.floor(bitLen / 0x100000000);
+        const lo = bitLen >>> 0;
+        bytes.push((hi>>>24)&255,(hi>>>16)&255,(hi>>>8)&255,hi&255,(lo>>>24)&255,(lo>>>16)&255,(lo>>>8)&255,lo&255);
+        let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+        const w = new Array(64);
+        for(let i=0;i<bytes.length;i+=64){
+          for(let j=0;j<16;j++){
+            const k=i+j*4;
+            w[j]=((bytes[k]<<24)|(bytes[k+1]<<16)|(bytes[k+2]<<8)|bytes[k+3])>>>0;
+          }
+          for(let j=16;j<64;j++){
+            const s0=(rotr(w[j-15],7)^rotr(w[j-15],18)^(w[j-15]>>>3))>>>0;
+            const s1=(rotr(w[j-2],17)^rotr(w[j-2],19)^(w[j-2]>>>10))>>>0;
+            w[j]=(w[j-16]+s0+w[j-7]+s1)>>>0;
+          }
+          let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+          for(let j=0;j<64;j++){
+            const S1=(rotr(e,6)^rotr(e,11)^rotr(e,25))>>>0;
+            const ch=((e&f)^((~e)&g))>>>0;
+            const temp1=(h+S1+ch+K[j]+w[j])>>>0;
+            const S0=(rotr(a,2)^rotr(a,13)^rotr(a,22))>>>0;
+            const maj=((a&b)^(a&c)^(b&c))>>>0;
+            const temp2=(S0+maj)>>>0;
+            h=g; g=f; f=e; e=(d+temp1)>>>0; d=c; c=b; b=a; a=(temp1+temp2)>>>0;
+          }
+          h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0; h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
+        }
+        return [h0,h1,h2,h3,h4,h5,h6,h7].map(h=>h.toString(16).padStart(8,'0')).join('');
+      }
       async function digestPassword(password, salt){
         const data = `${salt}|${password}`;
         if(window.crypto?.subtle){
-          const enc = new TextEncoder().encode(data);
-          const digest = await crypto.subtle.digest('SHA-256', enc);
-          return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,'0')).join('');
+          try{
+            const enc = new TextEncoder().encode(data);
+            const digest = await crypto.subtle.digest('SHA-256', enc);
+            return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,'0')).join('');
+          }catch(e){
+            console.warn('WebCrypto indisponível. Usando SHA-256 em JavaScript.', e);
+          }
         }
-        return `fallback_${simpleHash(data)}`;
+        return sha256HexFallback(data);
+      }
+      function legacyDigestPassword(password, salt){
+        return `fallback_${simpleHash(`${salt}|${password}`)}`;
       }
       function randomSalt(){
         if(window.crypto?.getRandomValues){
@@ -691,10 +757,31 @@
         event.preventDefault();
         const fd = new FormData(event.target);
         const email = fd.get('email').trim().toLowerCase();
-        const user = state.users.find(u => u.email === email && u.active !== false);
-        if(!user){ toast('Usuário não encontrado ou inativo.','danger'); return; }
-        const hash = await digestPassword(fd.get('password'), user.salt);
-        if(hash !== user.passHash){ toast('Senha inválida.','danger'); return; }
+        const password = fd.get('password');
+        const users = state.users.filter(u => u.email === email && u.active !== false);
+        if(!users.length){ toast('Usuário não encontrado ou inativo.','danger'); return; }
+
+        // Pode existir mais de um cadastro com o mesmo e-mail depois dos testes/redeploys.
+        // Neste caso, tenta a senha em todos e entra no cadastro que bater.
+        let user = null;
+        let migratedHash = null;
+        for(const candidate of users){
+          const salt = candidate.salt || '';
+          const hash = await digestPassword(password, salt);
+          const legacyHash = legacyDigestPassword(password, salt);
+          if(hash === candidate.passHash || legacyHash === candidate.passHash){
+            user = candidate;
+            if(legacyHash === candidate.passHash && hash !== legacyHash) migratedHash = hash;
+            break;
+          }
+        }
+        if(!user){ toast('Senha inválida.','danger'); return; }
+        if(migratedHash){
+          user.passHash = migratedHash;
+          fetch(`${API_URL}/users`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(user)}).catch(console.error);
+          persist();
+        }
+
         state.user = user;
         sessionStorage.setItem(KEYS.session,user.id);
         audit('login', null, 'Acesso ao sistema');
@@ -1452,7 +1539,7 @@
         toast('HTML da proposta gerado.');
       }
       function publicProposalLink(id){
-        const base = location.href.split('?')[0].split('#')[0];
+        const base = publicSiteBase().replace(/\/$/, '');
         return `${base}?publicProposal=${encodeURIComponent(id)}`;
       }
       function renderPublicProposal(id){
