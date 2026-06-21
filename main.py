@@ -124,7 +124,24 @@ def save_proposal(payload: Dict[str, Any], db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "proposal": payload}
 
-# --- MODELOS / TEMPLATES ---
+# --- PROPOSTAS ---
+@app.post("/api/proposals/aceitar")
+def accept_proposal(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    proposal_id = payload.get("proposalId")
+    if not proposal_id:
+        raise HTTPException(status_code=400, detail="ID da proposta é obrigatório")
+    
+    db_prop = db.query(ProposalModel).filter(ProposalModel.id == proposal_id).first()
+    if not db_prop:
+        raise HTTPException(status_code=404, detail="Proposta não encontrada")
+    
+    proposal_data = json.loads(db_prop.data)
+    proposal_data["status"] = "Aceita"
+    proposal_data["dados_aceite"] = payload
+    db_prop.data = json.dumps(proposal_data)
+    
+    db.commit()
+    return {"status": "success", "proposal": proposal_data}
 @app.post("/api/templates")
 def save_template(payload: Dict[str, Any], db: Session = Depends(get_db)):
     tpl_id = payload.get("id")
