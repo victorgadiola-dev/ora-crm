@@ -136,7 +136,8 @@ def accept_proposal(payload: Dict[str, Any], db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Proposta não encontrada")
     
     proposal_data = json.loads(db_prop.data)
-    proposal_data["status"] = "Aceita"
+    proposal_data["etapa"] = "Aprovada"
+    proposal_data["status"] = "Aprovada"
     proposal_data["dados_aceite"] = payload
     db_prop.data = json.dumps(proposal_data)
     
