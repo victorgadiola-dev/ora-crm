@@ -1,4 +1,7 @@
 import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,8 +23,27 @@ app.add_middleware(
 )
 
 # Banco de Dados SQLite com SQLAlchemy
-DATABASE_URL = "sqlite:///./ora_crm_database.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# Por padrão, mantém o arquivo na pasta do projeto.
+# Em produção, configure ORA_DB_PATH (ex.: /var/data/ora_crm_database.db em um disco persistente)
+# para evitar perda de dados em redeploys.
+def resolve_database_url() -> str:
+    explicit_url = os.getenv("DATABASE_URL")
+    if explicit_url:
+        return explicit_url
+
+    db_path = os.getenv("ORA_DB_PATH") or os.getenv("SQLITE_DB_PATH")
+    if not db_path:
+        data_dir = os.getenv("RENDER_DISK_PATH") or os.getenv("DATA_DIR")
+        db_path = str(Path(data_dir) / "ora_crm_database.db") if data_dir else "./ora_crm_database.db"
+
+    db_file = Path(db_path)
+    if db_file.parent and str(db_file.parent) not in ("", "."):
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{db_file}"
+
+DATABASE_URL = resolve_database_url()
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -136,13 +158,27 @@ def accept_proposal(payload: Dict[str, Any], db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Proposta não encontrada")
     
     proposal_data = json.loads(db_prop.data)
+    accepted_at = payload.get("acceptedAt") or datetime.now(timezone.utc).isoformat()
+    protocol = payload.get("protocol")
+
+    # O front-end usa o campo `stage` para mover o card no kanban e dashboards.
+    # Mantemos `etapa` e `status` por compatibilidade com integrações já existentes.
+    proposal_data["stage"] = "aprovada"
     proposal_data["etapa"] = "Aprovada"
     proposal_data["status"] = "Aprovada"
+    proposal_data["probability"] = 100
+    proposal_data["acceptedAt"] = accepted_at
+    proposal_data["acceptedBy"] = payload.get("acceptedBy")
+    proposal_data["acceptanceProtocol"] = protocol
+    proposal_data["acceptanceDocument"] = payload.get("document")
+    proposal_data["acceptanceUserAgent"] = payload.get("userAgent")
     proposal_data["dados_aceite"] = payload
-    db_prop.data = json.dumps(proposal_data)
+    proposal_data["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    db_prop.data = json.dumps(proposal_data, ensure_ascii=False)
     
     db.commit()
     return {"status": "success", "proposal": proposal_data}
+
 @app.post("/api/templates")
 def save_template(payload: Dict[str, Any], db: Session = Depends(get_db)):
     tpl_id = payload.get("id")

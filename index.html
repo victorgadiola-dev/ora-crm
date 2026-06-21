@@ -430,21 +430,43 @@
         });
       }
       async function loadAll(){
+        const localUsers = load(KEYS.users, []);
+        const localProposals = load(KEYS.proposals, []);
+        const localTemplates = load(KEYS.templates, []);
+        const localSettings = load(KEYS.settings, {});
+        const localAudit = load(KEYS.audit, []);
         try {
           const res = await fetch(`${API_URL}/init`);
+          if(!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
-          state.users = data.users || [];
-          state.proposals = data.proposals || [];
-          state.templates = mergeTemplates(data.templates || []);
-          state.settings = deepMerge(structuredClone(defaultSettings), data.settings || {});
-          state.audit = data.audit || [];
+          const apiUsers = data.users || [];
+          const apiProposals = data.proposals || [];
+          const apiTemplates = data.templates || [];
+          const apiSettings = data.settings || {};
+          const apiAudit = data.audit || [];
+          const useLocalUsers = !apiUsers.length && localUsers.length;
+          const useLocalProposals = !apiProposals.length && localProposals.length;
+          const useLocalTemplates = !apiTemplates.length && localTemplates.length;
+          const useLocalSettings = !Object.keys(apiSettings).length && Object.keys(localSettings).length;
+          const useLocalAudit = !apiAudit.length && localAudit.length;
+
+          state.users = useLocalUsers ? localUsers : apiUsers;
+          state.proposals = (useLocalProposals ? localProposals : apiProposals).map(normalizeProposal);
+          state.templates = mergeTemplates(useLocalTemplates ? localTemplates : apiTemplates);
+          state.settings = deepMerge(structuredClone(defaultSettings), useLocalSettings ? localSettings : apiSettings);
+          state.audit = useLocalAudit ? localAudit : apiAudit;
+          persist();
+
+          if(useLocalUsers || useLocalProposals || useLocalTemplates || useLocalSettings){
+            syncLocalCacheToApi().catch(e => console.warn('Não foi possível reidratar a API com o cache local.', e));
+          }
         } catch(e) {
           console.warn("API Offline. Usando cache local localStorage como fallback.", e);
-          state.users = load(KEYS.users, []);
-          state.proposals = load(KEYS.proposals, []);
-          state.templates = mergeTemplates(load(KEYS.templates, []));
-          state.settings = deepMerge(structuredClone(defaultSettings), load(KEYS.settings, {}));
-          state.audit = load(KEYS.audit, []);
+          state.users = localUsers;
+          state.proposals = localProposals.map(normalizeProposal);
+          state.templates = mergeTemplates(localTemplates);
+          state.settings = deepMerge(structuredClone(defaultSettings), localSettings);
+          state.audit = localAudit;
         }
       }
       function load(key, fallback){
@@ -457,6 +479,62 @@
         save(KEYS.templates, state.templates);
         save(KEYS.settings, state.settings);
         save(KEYS.audit, state.audit.slice(-300));
+      }
+      function normalizeProposal(p){
+        if(!p || typeof p !== 'object') return p;
+        const acceptance = p.dados_aceite || {};
+        const approved = p.stage === 'aprovada' || p.status === 'Aprovada' || p.etapa === 'Aprovada' || !!p.acceptedAt || !!p.dados_aceite;
+        if(approved){
+          p.stage = 'aprovada';
+          p.status = 'Aprovada';
+          p.etapa = 'Aprovada';
+          p.probability = 100;
+          p.acceptedAt = p.acceptedAt || acceptance.acceptedAt || new Date().toISOString();
+          p.acceptedBy = p.acceptedBy || acceptance.acceptedBy || '';
+          p.acceptanceProtocol = p.acceptanceProtocol || acceptance.protocol || '';
+          p.acceptanceDocument = p.acceptanceDocument || acceptance.document || '';
+        }
+        return p;
+      }
+      function acceptanceEndpoint(){
+        return state.settings?.email?.acceptanceEndpoint || `${API_URL}/proposals/aceitar`;
+      }
+      async function postAcceptance(payload){
+        const endpoint = acceptanceEndpoint();
+        if(!endpoint) return null;
+        try{
+          const res = await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+          if(!res.ok) throw new Error(`HTTP ${res.status}`);
+          return await res.json().catch(()=>({status:'success'}));
+        }catch(e){
+          console.warn('Falha ao enviar aceite para a API.', e);
+          return null;
+        }
+      }
+      function applyAcceptedProposal(id,payload,serverProposal=null){
+        const p = state.proposals.find(x=>x.id===id);
+        if(!p) return null;
+        if(serverProposal && typeof serverProposal === 'object') Object.assign(p, serverProposal);
+        p.stage = 'aprovada';
+        p.status = 'Aprovada';
+        p.etapa = 'Aprovada';
+        p.probability = 100;
+        p.acceptedAt = payload.acceptedAt || p.acceptedAt || new Date().toISOString();
+        p.acceptedBy = payload.acceptedBy || p.acceptedBy || '';
+        p.acceptanceProtocol = payload.protocol || p.acceptanceProtocol || '';
+        p.acceptanceDocument = payload.document || p.acceptanceDocument || '';
+        p.dados_aceite = payload;
+        p.updatedAt = new Date().toISOString();
+        save(KEYS.proposals,state.proposals);
+        return p;
+      }
+      async function syncLocalCacheToApi(){
+        const jobs = [];
+        state.users.forEach(u => jobs.push(fetch(`${API_URL}/users`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(u)})));
+        state.proposals.forEach(p => jobs.push(fetch(`${API_URL}/proposals`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)})));
+        state.templates.filter(t => !t.system).forEach(t => jobs.push(fetch(`${API_URL}/templates`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(t)})));
+        if(state.settings) jobs.push(fetch(`${API_URL}/settings`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(state.settings)}));
+        if(jobs.length) await Promise.allSettled(jobs);
       }
       function mergeTemplates(saved){
         const map = new Map();
@@ -835,7 +913,7 @@
               <td>${esc(templateById(p.typeId)?.name || '—')}</td>
               <td>${esc(p.sellerName || '—')}<br><span class="muted">Indicação: ${esc(p.indicatedBy || '—')}</span></td>
               <td><strong>${money(getProposalValue(p))}</strong></td>
-              <td><span class="badge ${stageById(p.stage).tone}">${stageById(p.stage).name}</span></td>
+              <td><span class="badge ${stageById(p.stage).tone}">${stageById(p.stage).name}</span>${p.acceptedAt ? `<br><span class="muted">Aceite: ${esc(p.acceptedBy || '—')} • ${brDate(p.acceptedAt)}</span>${p.acceptanceProtocol ? `<br><span class="muted">${esc(p.acceptanceProtocol)}</span>` : ''}` : ''}</td>
               <td>${esc(p.nextAction || '—')}<br><span class="muted">${brDate(p.nextActionDate)}</span></td>
               <td>
                 <div class="actions">
@@ -1311,7 +1389,7 @@
             <button class="btn success" onclick="acceptProposal()">Aceitar proposta</button>
             <div id="acceptResult" class="section-hint" style="margin-top:10px"></div>
           </div>` : '';
-        const acceptanceEndpoint = state.settings.email.acceptanceEndpoint || '';
+        const acceptanceEndpoint = state.settings.email.acceptanceEndpoint || `${API_URL}/proposals/aceitar`;
         return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(p.proposalNumber)} | ${esc(p.clientName)}</title><style>${style}</style></head>
         <body>
           <div class="public-topbar no-print">
@@ -1326,6 +1404,8 @@
           ${acceptPanel}
           <script>
             const PROPOSAL_ID = ${JSON.stringify(p.id)};
+            const PROPOSAL_NUMBER = ${JSON.stringify(p.proposalNumber || '')};
+            const CLIENT_NAME = ${JSON.stringify(p.clientName || '')};
             const ACCEPTANCE_ENDPOINT = ${JSON.stringify(acceptanceEndpoint)};
             const STORAGE_KEY = ${JSON.stringify(KEYS.proposals)};
             function protocol(){return 'ORA-ACEITE-' + new Date().toISOString().replace(/[-:.TZ]/g,'').slice(0,14);}
@@ -1335,19 +1415,22 @@
               const check = document.getElementById('acceptCheck').checked;
               const result = document.getElementById('acceptResult');
               if(!name || !doc || !check){ result.textContent = 'Preencha os dados e confirme a ciência dos termos.'; return; }
-              const payload = {proposalId:PROPOSAL_ID, acceptedBy:name, document:doc, acceptedAt:new Date().toISOString(), protocol:protocol(), userAgent:navigator.userAgent};
+              const payload = {proposalId:PROPOSAL_ID, proposalNumber:PROPOSAL_NUMBER, clientName:CLIENT_NAME, acceptedBy:name, document:doc, acceptedAt:new Date().toISOString(), protocol:protocol(), userAgent:navigator.userAgent};
               try{
                 const raw = localStorage.getItem(STORAGE_KEY);
                 if(raw){
                   const list = JSON.parse(raw);
                   const idx = list.findIndex(p=>p.id===PROPOSAL_ID);
-                  if(idx >= 0){ list[idx].stage='aprovada'; list[idx].probability=100; list[idx].acceptedAt=payload.acceptedAt; list[idx].acceptedBy=name; list[idx].acceptanceProtocol=payload.protocol; localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
+                  if(idx >= 0){ list[idx].stage='aprovada'; list[idx].status='Aprovada'; list[idx].etapa='Aprovada'; list[idx].probability=100; list[idx].acceptedAt=payload.acceptedAt; list[idx].acceptedBy=name; list[idx].acceptanceProtocol=payload.protocol; list[idx].acceptanceDocument=doc; list[idx].dados_aceite=payload; localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
                 }
               }catch(e){}
+              let apiOk = false;
               if(ACCEPTANCE_ENDPOINT){
-                try{ await fetch(ACCEPTANCE_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); }catch(e){}
+                try{ const response = await fetch(ACCEPTANCE_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); apiOk = response.ok; }catch(e){}
               }
-              result.innerHTML = '<strong>Aceite registrado.</strong><br>Protocolo: ' + payload.protocol;
+              result.innerHTML = apiOk
+                ? '<strong>Aceite registrado no sistema.</strong><br>Protocolo: ' + payload.protocol
+                : '<strong>Aceite registrado nesta página.</strong><br>Protocolo: ' + payload.protocol + '<br>Não foi possível confirmar o envio ao sistema. Avise a ORA com este protocolo.';
             }
           <\/script>
         </body></html>`;
@@ -1401,15 +1484,14 @@
         const res = document.getElementById('acceptResult');
         if(!name || !doc || !ok){ res.textContent='Preencha os dados e confirme a ciência dos termos.'; return; }
         const protocol = 'ORA-ACEITE-' + new Date().toISOString().replace(/[-:.TZ]/g,'').slice(0,14);
-        const payload = {proposalId:id, proposalNumber:p.proposalNumber, clientName:p.clientName, acceptedBy:name, document:doc, acceptedAt:new Date().toISOString(), protocol};
-        p.stage='aprovada'; p.probability=100; p.acceptedAt=payload.acceptedAt; p.acceptedBy=name; p.acceptanceProtocol=protocol; p.updatedAt=new Date().toISOString();
-        save(KEYS.proposals,state.proposals);
-        if(state.settings.email.acceptanceEndpoint){
-          try{ await fetch(state.settings.email.acceptanceEndpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); }catch(e){ console.warn(e); }
-        }
+        const payload = {proposalId:id, proposalNumber:p.proposalNumber, clientName:p.clientName, acceptedBy:name, document:doc, acceptedAt:new Date().toISOString(), protocol, userAgent:navigator.userAgent};
+        const apiResult = await postAcceptance(payload);
+        applyAcceptedProposal(id, payload, apiResult?.proposal);
         const queue = load(KEYS.acceptanceQueue, []);
-        queue.push(payload); save(KEYS.acceptanceQueue, queue);
-        res.innerHTML = `<strong>Aceite registrado.</strong><br>Protocolo: ${protocol}`;
+        queue.push({...payload, synced: !!apiResult}); save(KEYS.acceptanceQueue, queue);
+        res.innerHTML = apiResult
+          ? `<strong>Aceite registrado no sistema.</strong><br>Protocolo: ${protocol}`
+          : `<strong>Aceite registrado nesta base local.</strong><br>Protocolo: ${protocol}<br>Não foi possível confirmar o envio ao servidor agora.`;
       }
 
       function renderTemplates(){
@@ -1866,7 +1948,15 @@
         const to = document.querySelector('[name="emailTo"]')?.value || p.contactEmail;
         const subject = document.querySelector('[name="emailSubject"]')?.value || '';
         const body = document.getElementById('emailBody')?.value || '';
-        window.location.href = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+        const mailtoUrl = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+        const win = window.open(mailtoUrl, '_blank', 'noopener,noreferrer');
+        if(!win){
+          const a = document.createElement('a');
+          a.href = mailtoUrl;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          document.body.appendChild(a); a.click(); a.remove();
+        }
         markSent(p);
       }
       async function sendProposalEmail(id){
