@@ -1010,6 +1010,7 @@
                   <button class="btn blue small" onclick="ORA.openPreview('${p.id}')">HTML/PDF</button>
                   <button class="btn light small" onclick="ORA.openEmailModal('${p.id}')">E-mail</button>
                   <button class="btn light small" onclick="ORA.duplicateProposal('${p.id}')">Duplicar</button>
+                  <button class="btn danger small" onclick="ORA.deleteProposal('${p.id}')">Excluir</button>
                 </div>
               </td>
             </tr>`).join('')}
@@ -1212,6 +1213,7 @@
                 </div>
                 <div class="actions">
                   <button type="button" class="btn light" onclick="ORA.go('proposals')">Cancelar</button>
+                  ${!isNew ? `<button type="button" class="btn danger" onclick="ORA.deleteProposal('${p.id}')">Excluir proposta</button>` : ''}
                   <button type="submit" class="btn blue">Salvar proposta</button>
                   ${!isNew ? `<button type="button" class="btn terra" onclick="ORA.openPreview('${p.id}')">Prévia imprimível</button>` : ''}
                 </div>
@@ -1289,6 +1291,27 @@
         toast('Proposta salva com sucesso.');
         go('proposals');
       }
+
+      async function deleteProposal(id){
+        const p = state.proposals.find(x=>x.id===id);
+        if(!p) return;
+        const label = `${p.proposalNumber || 'Proposta'} — ${p.clientName || ''}`.trim();
+        if(!confirm(`Excluir definitivamente a proposta ${label}?\n\nEssa ação não pode ser desfeita.`)) return;
+        try{
+          const res = await fetch(`${API_URL}/proposals/${encodeURIComponent(id)}`, {method:'DELETE'});
+          if(!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+          state.proposals = state.proposals.filter(x=>x.id!==id);
+          audit('exclusão de proposta', id, label);
+          persist();
+          toast('Proposta excluída com sucesso.');
+          closeModal();
+          go('proposals');
+        }catch(e){
+          console.error(e);
+          toast('Não foi possível excluir a proposta no servidor. Tente novamente.','danger');
+        }
+      }
+
       function duplicateProposal(id){
         const p = state.proposals.find(x=>x.id===id);
         if(!p) return;
@@ -2108,7 +2131,7 @@
 
       return {
         init, go, logout, createAdmin, login, setFilter, saveProposal, updateProbabilityFromStage, applyTemplateToForm,
-        openPreview, printProposal, savePreviewEdits, downloadProposalHtml, duplicateProposal,
+        openPreview, printProposal, savePreviewEdits, downloadProposalHtml, duplicateProposal, deleteProposal,
         allowDrop, dragProposal, dropProposal,
         openTemplateModal, saveTemplate, cloneTemplate, deleteTemplate, restoreTemplate,
         testApi, pullAthenas, pushSelectedToAthenas, copySelectedPayload, importAthenasJson,
