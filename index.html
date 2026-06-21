@@ -330,7 +330,8 @@
         settings:'ora_crm_settings_v2',
         session:'ora_crm_session_v2',
         audit:'ora_crm_audit_v2',
-        acceptanceQueue:'ora_crm_acceptance_queue_v2'
+        acceptanceQueue:'ora_crm_acceptance_queue_v2',
+        deletedProposals:'ora_crm_deleted_proposals_v2'
       };
       const stages = [
         {id:'rascunho', name:'Rascunho', prob:5, tone:'muted'},
@@ -369,6 +370,7 @@
       const state = {
         users:[],
         proposals:[],
+        deletedProposals:[],
         templates:[],
         settings:null,
         audit:[],
@@ -413,13 +415,11 @@
         }
       };
 
-    // O sistema pode ser aberto pelo domínio externo comercial.oragestao.com.br.
-    // Mesmo assim, a API oficial continua sendo o backend do Render.
-    const REMOTE_API_URL = "https://ora-crm.onrender.com/api";
+    // Quando o sistema estiver online, usa a API do mesmo domínio aberto no navegador.
+    // Isso evita gravar/consultar em um domínio diferente do comercial.oragestao.com.br.
     const PUBLIC_SITE_URL = "https://comercial.oragestao.com.br";
-    const API_URL = (["localhost", "127.0.0.1", ""].includes(location.hostname))
-      ? "http://localhost:8000/api"
-      : REMOTE_API_URL;
+    const IS_LOCAL = ["localhost", "127.0.0.1", ""].includes(location.hostname);
+    const API_URL = IS_LOCAL ? "http://localhost:8000/api" : `${location.origin}/api`;
     function publicSiteBase(){
       const host = location.hostname;
       if(["localhost", "127.0.0.1", ""].includes(host)) return location.href.split('?')[0].split('#')[0];
@@ -442,27 +442,43 @@
       }
       async function loadAll(){
         const localUsers = load(KEYS.users, []);
-        const localProposals = load(KEYS.proposals, []);
+        const localDeletedProposalIds = load(KEYS.deletedProposals, []);
+        state.deletedProposals = Array.from(new Set(localDeletedProposalIds));
+        const localProposals = (load(KEYS.proposals, []) || [])
+          .map(normalizeProposal)
+          .filter(p => !isDeletedProposal(p) && !state.deletedProposals.includes(p.id));
         const localTemplates = load(KEYS.templates, []);
+        const localDeletedProposals = load(KEYS.deletedProposals, []);
         const localSettings = load(KEYS.settings, {});
         const localAudit = load(KEYS.audit, []);
         try {
-          const res = await fetch(`${API_URL}/init`);
+          const res = await fetch(`${API_URL}/init?_=${Date.now()}`, {cache:'no-store'});
           if(!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           const apiUsers = data.users || [];
-          const apiProposals = data.proposals || [];
+          const apiProposalsRaw = data.proposals || [];
+          const apiDeletedIds = [
+            ...(data.deletedProposals || []),
+            ...apiProposalsRaw.filter(isDeletedProposal).map(p => p.id).filter(Boolean)
+          ];
+          state.deletedProposals = Array.from(new Set([...state.deletedProposals, ...apiDeletedIds]));
+          const apiProposals = apiProposalsRaw
+            .map(normalizeProposal)
+            .filter(p => !isDeletedProposal(p) && !state.deletedProposals.includes(p.id));
           const apiTemplates = data.templates || [];
           const apiSettings = data.settings || {};
           const apiAudit = data.audit || [];
-          const useLocalUsers = !apiUsers.length && localUsers.length;
-          const useLocalProposals = !apiProposals.length && localProposals.length;
-          const useLocalTemplates = !apiTemplates.length && localTemplates.length;
-          const useLocalSettings = !Object.keys(apiSettings).length && Object.keys(localSettings).length;
-          const useLocalAudit = !apiAudit.length && localAudit.length;
+          const serverLooksEmpty = !apiUsers.length && !apiProposalsRaw.length && !apiTemplates.length && !Object.keys(apiSettings).length && !apiDeletedIds.length;
+          const useLocalUsers = serverLooksEmpty && localUsers.length;
+          // Só recupera propostas do navegador quando a API parece zerada de verdade.
+          // Assim, uma exclusão real no servidor não volta ao dar F5/CTRL+F5.
+          const useLocalProposals = serverLooksEmpty && localProposals.length;
+          const useLocalTemplates = serverLooksEmpty && localTemplates.length;
+          const useLocalSettings = serverLooksEmpty && Object.keys(localSettings).length;
+          const useLocalAudit = serverLooksEmpty && localAudit.length;
 
           state.users = useLocalUsers ? localUsers : apiUsers;
-          state.proposals = (useLocalProposals ? localProposals : apiProposals).map(normalizeProposal);
+          state.proposals = useLocalProposals ? localProposals : apiProposals;
           state.templates = mergeTemplates(useLocalTemplates ? localTemplates : apiTemplates);
           state.settings = deepMerge(structuredClone(defaultSettings), useLocalSettings ? localSettings : apiSettings);
           state.audit = useLocalAudit ? localAudit : apiAudit;
@@ -474,7 +490,8 @@
         } catch(e) {
           console.warn("API Offline. Usando cache local localStorage como fallback.", e);
           state.users = localUsers;
-          state.proposals = localProposals.map(normalizeProposal);
+          state.deletedProposals = Array.from(new Set(localDeletedProposalIds || []));
+          state.proposals = localProposals;
           state.templates = mergeTemplates(localTemplates);
           state.settings = deepMerge(structuredClone(defaultSettings), localSettings);
           state.audit = localAudit;
@@ -486,10 +503,19 @@
       function save(key, data){ localStorage.setItem(key, JSON.stringify(data)); }
       function persist(){
         save(KEYS.users, state.users);
-        save(KEYS.proposals, state.proposals);
+        save(KEYS.proposals, state.proposals.filter(p => !isDeletedProposal(p)));
         save(KEYS.templates, state.templates);
         save(KEYS.settings, state.settings);
         save(KEYS.audit, state.audit.slice(-300));
+        save(KEYS.deletedProposals, state.deletedProposals || []);
+      }
+      function isDeletedProposal(p){
+        return !!(p && (p._deleted === true || p.deleted === true || p.deletedAt || p.status === 'Excluída' || p.etapa === 'Excluída'));
+      }
+      function rememberDeletedProposal(id){
+        if(!id) return;
+        state.deletedProposals = Array.from(new Set([...(state.deletedProposals || []), id]));
+        save(KEYS.deletedProposals, state.deletedProposals);
       }
       function normalizeProposal(p){
         if(!p || typeof p !== 'object') return p;
@@ -542,7 +568,8 @@
       async function syncLocalCacheToApi(){
         const jobs = [];
         state.users.forEach(u => jobs.push(fetch(`${API_URL}/users`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(u)})));
-        state.proposals.forEach(p => jobs.push(fetch(`${API_URL}/proposals`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)})));
+        const deletedSet = new Set(state.deletedProposals || []);
+        state.proposals.filter(p=>p && !isDeletedProposal(p) && !deletedSet.has(p.id)).forEach(p => jobs.push(fetch(`${API_URL}/proposals`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)})));
         state.templates.filter(t => !t.system).forEach(t => jobs.push(fetch(`${API_URL}/templates`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(t)})));
         if(state.settings) jobs.push(fetch(`${API_URL}/settings`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(state.settings)}));
         if(jobs.length) await Promise.allSettled(jobs);
@@ -1292,23 +1319,107 @@
         go('proposals');
       }
 
+      async function fetchServerStateNoStore(){
+        const res = await fetch(`${API_URL}/init?_=${Date.now()}`, {cache:'no-store'});
+        if(!res.ok) throw new Error(`Falha ao atualizar dados do servidor: HTTP ${res.status}`);
+        return await res.json();
+      }
+
+      function visibleProposalsFromServer(data){
+        const raw = data?.proposals || [];
+        const serverDeletedIds = data?.deletedProposals || [];
+        const deletedIds = new Set([
+          ...(state.deletedProposals || []),
+          ...serverDeletedIds,
+          ...raw.filter(isDeletedProposal).map(p=>p.id).filter(Boolean)
+        ]);
+        return raw
+          .map(normalizeProposal)
+          .filter(p=>!isDeletedProposal(p) && !deletedIds.has(p.id));
+      }
+
+      function proposalVisibleInServerState(data,id){
+        return visibleProposalsFromServer(data).some(x=>x.id===id);
+      }
+
+      async function deleteProposalOnServer(id, proposal){
+        const encodedId = encodeURIComponent(id);
+        const now = new Date().toISOString();
+        const deletedPayload = {
+          ...proposal,
+          deleted:true,
+          _deleted:true,
+          status:'Excluída',
+          etapa:'Excluída',
+          deletedAt:now,
+          deletedBy:state.user?.id || state.user?.email || state.user?.name || 'Sistema',
+          updatedAt:now
+        };
+        const errors = [];
+
+        async function checkGone(){
+          const fresh = await fetchServerStateNoStore();
+          return !proposalVisibleInServerState(fresh, id);
+        }
+
+        const hardAttempts = [
+          () => fetch(`${API_URL}/proposals/${encodedId}`, {method:'DELETE', cache:'no-store'}),
+          () => fetch(`${API_URL}/proposals/excluir`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, proposalId:id})}),
+          () => fetch(`${API_URL}/proposals/delete`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, proposalId:id})})
+        ];
+
+        for(const attempt of hardAttempts){
+          try{
+            const res = await attempt();
+            if(res.ok && await checkGone()) return;
+            if(!res.ok) errors.push(`HTTP ${res.status}`);
+          }catch(e){
+            errors.push(e?.message || String(e));
+          }
+        }
+
+        try{
+          // Último recurso compatível com backend antigo: grava a proposta como excluída.
+          // O carregamento ignora propostas com deleted/deletedAt, inclusive em aba anônima.
+          const res = await fetch(`${API_URL}/proposals`, {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(deletedPayload)
+          });
+          if(res.ok && await checkGone()) return;
+          if(!res.ok) errors.push(`soft-delete HTTP ${res.status}`);
+        }catch(e){
+          errors.push(e?.message || String(e));
+        }
+
+        throw new Error(`Falha ao excluir no servidor: ${errors.join(' | ')}`);
+      }
+
       async function deleteProposal(id){
         const p = state.proposals.find(x=>x.id===id);
         if(!p) return;
         const label = `${p.proposalNumber || 'Proposta'} — ${p.clientName || ''}`.trim();
         if(!confirm(`Excluir definitivamente a proposta ${label}?\n\nEssa ação não pode ser desfeita.`)) return;
         try{
-          const res = await fetch(`${API_URL}/proposals/${encodeURIComponent(id)}`, {method:'DELETE'});
-          if(!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
-          state.proposals = state.proposals.filter(x=>x.id!==id);
+          await deleteProposalOnServer(id, p);
+          rememberDeletedProposal(id);
+
+          const fresh = await fetchServerStateNoStore();
+          state.deletedProposals = Array.from(new Set([...(state.deletedProposals || []), ...(fresh.deletedProposals || [])]));
+          state.proposals = visibleProposalsFromServer(fresh);
+          state.users = fresh.users || state.users;
+          state.templates = mergeTemplates(fresh.templates || []);
+          state.settings = deepMerge(structuredClone(defaultSettings), fresh.settings || state.settings || {});
+          state.audit = fresh.audit || state.audit;
+
           audit('exclusão de proposta', id, label);
           persist();
-          toast('Proposta excluída com sucesso.');
+          toast('Proposta excluída definitivamente.');
           closeModal();
           go('proposals');
         }catch(e){
           console.error(e);
-          toast('Não foi possível excluir a proposta no servidor. Tente novamente.','danger');
+          toast('Não foi possível excluir no banco online. Suba também o main.py atualizado e aguarde o deploy do Render.','danger');
         }
       }
 
