@@ -415,7 +415,7 @@
 
     const API_URL = (["localhost", "127.0.0.1", ""].includes(location.hostname))
       ? "http://localhost:8000/api"
-      : "https://ora-crm.onrender.com/api";
+      : `${location.origin}/api`;
 
       function init() {
         loadAll().then(() => {
